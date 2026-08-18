@@ -311,6 +311,21 @@ def _resolve_repo_digest(tag: str) -> str | None:
     return None
 
 
+def _declared_language(spec: BootstrapSpec) -> LanguageHint:
+    """Trust the caller's language hint when they supplied their own Dockerfile.
+
+    Auto-detection is skipped on this path because the caller owns the image, but
+    the language still decides how test logs are parsed, so an explicit hint must
+    be honoured rather than discarded as UNKNOWN.
+    """
+    for hint in spec.languages_hint or []:
+        try:
+            return LanguageHint(hint)
+        except ValueError:
+            logger.warning("unknown languages_hint %r; ignoring", hint)
+    return LanguageHint.UNKNOWN
+
+
 def _bootstrap_from_user_dockerfile(
     repo: RepoSpec,
     spec: BootstrapSpec,
@@ -388,11 +403,11 @@ def _bootstrap_from_user_dockerfile(
         result = BootstrapResult(
             image_digest=image_digest,
             image_tag=tag,
-            language=LanguageHint.UNKNOWN,  # we didn't detect — the user owns the image
+            language=_declared_language(spec),
             repo=owner_name,
             ref=ref_sha,
             rebuild_cmds=[],  # caller supplied a Dockerfile; rebuild is up to them
-            test_cmds=[],
+            test_cmds=list(spec.test_cmds),
             smoke_passed=True,  # no agent ran a smoke; trust the user
             iterations=0,
             build_time_sec=round(time.monotonic() - start, 2),

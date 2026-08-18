@@ -14,6 +14,7 @@ class PipelineName(StrEnum):
     # Mined from upstream history
     PR_DIFF = "pr_diff"  # text-only PR mining (was: pr_mining_lite)
     PR_RUNTIME = "pr_runtime"  # PR mining w/ sandbox verification (was: pr_mining)
+    PR_CHAIN = "pr_chain"  # many PRs replayed as gated stages in one long-horizon env
     COMMIT_RUNTIME = "commit_runtime"  # commit-level mining w/ sandbox (was: commit_mining)
     CVE_PATCHES = "cve_patches"  # CVE patches as training data (was: cve_mining)
     # Synthesized by LLM
@@ -185,6 +186,10 @@ class BootstrapSpec(BaseModel):
     max_llm_spend_usd: float | None = 5.0
     platform: Literal["linux/amd64", "linux/arm64"] = "linux/amd64"
     languages_hint: list[str] | None = None  # override auto-detection
+    # How to run the suite when `user_dockerfile` is set. The agent loop
+    # discovers these itself, but a user-supplied Dockerfile has no agent, and a
+    # runtime pipeline cannot grade anything without them.
+    test_cmds: list[str] = Field(default_factory=list)
 
 
 class PipelineSpec(BaseModel):

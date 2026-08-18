@@ -5,12 +5,14 @@ from repo2rlenv.pipelines.code_instruct import CodeInstructPipeline
 from repo2rlenv.pipelines.commit_runtime import CommitRuntimePipeline
 from repo2rlenv.pipelines.cve_patches import CVEPatchesPipeline
 from repo2rlenv.pipelines.equivalence_tests import EquivalenceTestsPipeline
+from repo2rlenv.pipelines.pr_chain import PRChainPipeline
 from repo2rlenv.pipelines.pr_diff import PRDiffPipeline
 from repo2rlenv.pipelines.pr_runtime import PRRuntimePipeline
 
 PIPELINES: dict[str, type[Pipeline]] = {
     "pr_diff": PRDiffPipeline,
     "pr_runtime": PRRuntimePipeline,
+    "pr_chain": PRChainPipeline,
     "commit_runtime": CommitRuntimePipeline,
     "code_instruct": CodeInstructPipeline,
     "equivalence_tests": EquivalenceTestsPipeline,
@@ -23,6 +25,7 @@ __all__ = [
     "CodeInstructPipeline",
     "CommitRuntimePipeline",
     "EquivalenceTestsPipeline",
+    "PRChainPipeline",
     "PRDiffPipeline",
     "PRRuntimePipeline",
     "Pipeline",

@@ -176,3 +176,100 @@ def changed_files(clone_dir: Path, commit_sha: str) -> list[str]:
         timeout=30,
     )
     return [line for line in raw.splitlines() if line.strip()]
+
+
+@dataclass(frozen=True, slots=True)
+class FirstParentCommit:
+    """One step along a branch's first-parent history.
+
+    `git diff parent_sha sha` is exactly the change the branch received at this
+    step, whether the project squash-merges, merge-commits, or pushes directly.
+    That uniformity is what makes a replayable chain of stages possible.
+    """
+
+    sha: str
+    parent_sha: str
+    subject: str
+    committed_at: str
+    is_merge: bool
+
+
+def first_parent_history(
+    clone_dir: Path,
+    *,
+    ref: str = "HEAD",
+    limit: int | None = None,
+) -> list[FirstParentCommit]:
+    """Return `ref`'s first-parent history, OLDEST first.
+
+    Oldest-first is the order a chain replays in. The root commit is dropped:
+    it has no parent, so no diff can be taken against it.
+    """
+    args = ["log", "--first-parent", "--format=%H%x1f%P%x1f%cI%x1f%s", "--no-decorate"]
+    if limit is not None:
+        args.append(f"--max-count={limit}")
+    args.append(ref)
+    raw = _run_git(args, clone_dir, timeout=300)
+
+    out: list[FirstParentCommit] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split(_FIELD_SEP)
+        if len(fields) < 4:
+            logger.debug("skipping malformed first-parent record: %r", line[:100])
+            continue
+        sha, parents_str, committed_at, subject = fields[0], fields[1], fields[2], fields[3]
+        parents = parents_str.split()
+        if not parents:
+            continue  # root commit — nothing to diff against
+        out.append(
+            FirstParentCommit(
+                sha=sha,
+                parent_sha=parents[0],
+                subject=subject,
+                committed_at=committed_at,
+                is_merge=len(parents) > 1,
+            )
+        )
+    out.reverse()
+    return out
+
+
+def range_diff(clone_dir: Path, before: str, after: str) -> str:
+    """Return the unified diff that takes the tree from `before` to `after`."""
+    return _run_git(
+        ["diff", "--no-color", "--no-ext-diff", f"{before}..{after}"],
+        clone_dir,
+        timeout=120,
+    )
+
+
+def range_changed_files(clone_dir: Path, before: str, after: str) -> list[str]:
+    """Return the paths that differ between two commits."""
+    raw = _run_git(
+        ["diff", "--no-color", "--name-only", f"{before}..{after}"],
+        clone_dir,
+        timeout=60,
+    )
+    return [line for line in raw.splitlines() if line.strip()]
+
+
+def file_at_commit(clone_dir: Path, commit: str, path: str) -> str | None:
+    """Return a file's contents at a commit, or None when it does not exist there.
+
+    Absence is an ordinary outcome, not an error: a stage's test file may have
+    been deleted by the change being replayed, and the caller mirrors that by
+    removing the file rather than failing.
+    """
+    proc = subprocess.run(
+        ["git", "show", f"{commit}:{path}"],
+        cwd=str(clone_dir),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout

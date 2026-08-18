@@ -199,7 +199,12 @@ def parse_jest(log: str) -> dict[str, str]:
     return out
 
 
-def _detect_runner(test_cmds: str) -> str:
+def detect_runner(test_cmds: str) -> str:
+    """Name the test runner a command string invokes.
+
+    Public because the chain controller and terminal verifier both need it to
+    agree with this module on how a log should be parsed.
+    """
     joined = test_cmds.lower()
     if "pytest" in joined:
         return "pytest"
@@ -327,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     log = _read_text(args.log)
     f2p = _read_json_list(args.f2p)
     p2p = _read_json_list(args.p2p)
-    runner = args.runner.strip() or _detect_runner(args.test_cmds)
+    runner = args.runner.strip() or detect_runner(args.test_cmds)
 
     status_map = parse_logs(runner, log)
 
@@ -384,6 +389,7 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "detect_runner",
     "grade",
     "main",
     "parse_cargo_test",

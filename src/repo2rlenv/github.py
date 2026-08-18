@@ -15,8 +15,10 @@ import json
 import logging
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -269,3 +271,223 @@ def fetch_file_at_ref(
         )
     except GitHubError:
         return None
+
+
+PullRequestState = Literal["OPEN", "CLOSED", "MERGED"]
+
+_PR_FILE_PAGE = 100
+"""Files requested per PR. `PullRequestRecord.files_truncated` flags overflow."""
+
+_GQL_PULL_REQUEST_PAGE = """
+query($owner:String!,$name:String!,$size:Int!,$files:Int!,$dir:OrderDirection!,$after:String){
+  rateLimit { remaining resetAt }
+  repository(owner:$owner,name:$name){
+    pullRequests(first:$size, orderBy:{field:CREATED_AT,direction:$dir}, after:$after){
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number title body state createdAt closedAt mergedAt isDraft url
+        baseRefName baseRefOid headRefOid additions deletions changedFiles
+        mergeCommit { oid }
+        author { login }
+        labels(first:20){ nodes { name } }
+        closingIssuesReferences(first:10){ nodes { number } }
+        files(first:$files){ totalCount nodes { path additions deletions } }
+      }
+    }
+  }
+}
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class ChangedFile:
+    """One path touched by a pull request, with its line churn."""
+
+    path: str
+    additions: int
+    deletions: int
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestRecord:
+    """Complete PR metadata for chain synthesis, harvested in one bulk pass.
+
+    Distinct from `PullRequestSummary`: that type serves the single-PR
+    pipelines and costs one extra REST call per PR to resolve `base_sha`.
+    This one carries every field the chain builder needs — base/head/merge
+    OIDs, churn, file paths, linked issues — and arrives 100 PRs per request.
+
+    `merge_commit_sha` is set only for `state == "MERGED"`; an unmerged PR has
+    no commit in the repository's history, so only its `head_sha` is fetchable
+    (via `refs/pull/<number>/head`).
+    """
+
+    number: int
+    title: str
+    body: str
+    state: PullRequestState
+    created_at: str
+    closed_at: str | None
+    merged_at: str | None
+    is_draft: bool
+    url: str
+    base_ref: str
+    base_sha: str
+    head_sha: str
+    merge_commit_sha: str | None
+    author: str | None
+    additions: int
+    deletions: int
+    changed_file_count: int
+    files: tuple[ChangedFile, ...]
+    files_truncated: bool
+    labels: tuple[str, ...]
+    closes_issues: tuple[int, ...]
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        return tuple(f.path for f in self.files)
+
+
+@dataclass(frozen=True, slots=True)
+class HarvestPage:
+    """One page of harvested PRs plus the cursor needed to resume after it."""
+
+    records: tuple[PullRequestRecord, ...]
+    end_cursor: str | None
+    has_next_page: bool
+    rate_limit_remaining: int
+
+
+def _parse_pr_node(node: dict) -> PullRequestRecord:
+    state = node["state"]
+    if state not in ("OPEN", "CLOSED", "MERGED"):
+        raise GitHubError(f"PR #{node['number']}: unknown state {state!r}")
+    files_block = node["files"] or {"totalCount": 0, "nodes": []}
+    file_nodes = files_block["nodes"] or []
+    merge_commit = node.get("mergeCommit")
+    author = node.get("author")
+    return PullRequestRecord(
+        number=node["number"],
+        title=node["title"] or "",
+        body=node.get("body") or "",
+        state=state,
+        created_at=node["createdAt"],
+        closed_at=node.get("closedAt"),
+        merged_at=node.get("mergedAt"),
+        is_draft=bool(node.get("isDraft")),
+        url=node["url"],
+        base_ref=node.get("baseRefName") or "",
+        base_sha=node.get("baseRefOid") or "",
+        head_sha=node.get("headRefOid") or "",
+        merge_commit_sha=(merge_commit or {}).get("oid"),
+        author=(author or {}).get("login"),
+        additions=node.get("additions") or 0,
+        deletions=node.get("deletions") or 0,
+        changed_file_count=node.get("changedFiles") or 0,
+        files=tuple(
+            ChangedFile(
+                path=f["path"],
+                additions=f.get("additions") or 0,
+                deletions=f.get("deletions") or 0,
+            )
+            for f in file_nodes
+        ),
+        files_truncated=files_block["totalCount"] > len(file_nodes),
+        labels=tuple(n["name"] for n in (node["labels"]["nodes"] or [])),
+        closes_issues=tuple(n["number"] for n in (node["closingIssuesReferences"]["nodes"] or [])),
+    )
+
+
+_TRANSIENT_GH_ERRORS = (
+    "HTTP 500",
+    "HTTP 502",
+    "HTTP 503",
+    "HTTP 504",
+    "was submitted too quickly",
+    "secondary rate limit",
+    "abuse detection",
+    "connection reset",
+    "timeout awaiting response",
+    "EOF",
+)
+
+
+def _run_gh_with_retry(
+    args: list[str],
+    *,
+    token: str | None = None,
+    attempts: int = 6,
+) -> str:
+    """`_run_gh` with bounded backoff on transient GitHub failures.
+
+    A full PR harvest is ~700 sequential requests; GitHub returns an occasional
+    502 or secondary-rate-limit refusal, and without a retry one blip discards
+    the whole run. Only the errors in `_TRANSIENT_GH_ERRORS` are retried — a
+    bad query or a permissions failure still raises on the first attempt.
+    """
+    delay = 2.0
+    for attempt in range(1, attempts + 1):
+        try:
+            return _run_gh(args, token=token)
+        except GitHubError as exc:
+            message = str(exc)
+            transient = any(marker in message for marker in _TRANSIENT_GH_ERRORS)
+            if not transient or attempt == attempts:
+                raise
+            logger.warning(
+                "transient gh failure (attempt %d/%d), retrying in %.0fs: %s",
+                attempt,
+                attempts,
+                delay,
+                message[-200:],
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, 60.0)
+    raise AssertionError("unreachable: loop either returns or raises")
+
+
+def harvest_pull_request_page(
+    owner: str,
+    name: str,
+    *,
+    after: str | None = None,
+    page_size: int = 100,
+    oldest_first: bool = True,
+    token: str | None = None,
+) -> HarvestPage:
+    """Fetch one page of PRs in every state via a single GraphQL request.
+
+    Costs 3 rate-limit points per 100 PRs, versus one REST call per PR for
+    `list_merged_prs`. `oldest_first=False` walks newest-first, which lets two
+    callers harvest opposite ends of a large repo concurrently.
+    """
+    args = [
+        "api",
+        "graphql",
+        "-f",
+        f"query={_GQL_PULL_REQUEST_PAGE}",
+        "-F",
+        f"owner={owner}",
+        "-F",
+        f"name={name}",
+        "-F",
+        f"size={page_size}",
+        "-F",
+        f"files={_PR_FILE_PAGE}",
+        "-f",
+        f"dir={'ASC' if oldest_first else 'DESC'}",
+    ]
+    if after is not None:
+        args += ["-f", f"after={after}"]
+    payload = json.loads(_run_gh_with_retry(args, token=token))
+    if "errors" in payload:
+        raise GitHubError(f"graphql errors: {payload['errors']}")
+    connection = payload["data"]["repository"]["pullRequests"]
+    page_info = connection["pageInfo"]
+    return HarvestPage(
+        records=tuple(_parse_pr_node(n) for n in connection["nodes"]),
+        end_cursor=page_info["endCursor"],
+        has_next_page=bool(page_info["hasNextPage"]),
+        rate_limit_remaining=payload["data"]["rateLimit"]["remaining"],
+    )

@@ -152,6 +152,7 @@ nav:
       - "code_instruct (experimental)": pipelines/code_instruct.md
       - "equivalence_tests (experimental)": pipelines/equivalence_tests.md
       - "cve_patches (experimental)": pipelines/cve_patches.md
+      - "pr_chain (experimental)": pipelines/pr_chain.md
   - RFCs:
       - Index: rfcs/README.md
       - "0001 — pr_diff": rfcs/0001-pr-diff.md
@@ -164,6 +165,7 @@ nav:
       - "0008 — env_setup (draft)": rfcs/0008-env-setup.md
       - "0009 — test_synthesis (draft)": rfcs/0009-test-synthesis.md
       - "0010 — issue_runtime (draft)": rfcs/0010-issue-runtime.md
+      - "0011 — pr_chain": rfcs/0011-pr-chain.md
       - Template: rfcs/TEMPLATE.md
   - Reference:
       - API: reference/API.md

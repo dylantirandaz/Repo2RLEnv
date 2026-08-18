@@ -162,6 +162,27 @@ def _reward_doc_for(pipeline: str) -> str:
             "`resolved` requires **all** FAIL_TO_PASS to pass AND **all** PASS_TO_PASS "
             "to be maintained. No API key is needed — grading is purely test-based."
         )
+    if pipeline == "pr_chain":
+        return (
+            "The reward is **test-execution over a chain of stages**. Each task is a "
+            "contiguous run of the repository's history split into milestones that each "
+            "end on a real pull request; the agent advances through them with the "
+            "in-container `chain` command (`chain status` / `chain submit`).\n\n"
+            "At the end, `tests/test.sh` recomputes the score from scratch against the "
+            "tree the agent left: every stage's test files are restored from history, "
+            "each stage's tests are re-run, and the stage scores "
+            "(`f2p_rate × p2p_rate`, as in `pr_runtime`) are **averaged**:\n\n"
+            "```json\n"
+            '{"reward": 0.72, "stages_total": 25, "stages_resolved": 18,\n'
+            ' "stage_rewards": [1.0, 1.0, 0.5, ...],\n'
+            ' "horizon": {"submissions": 31, "stages_accepted": 18}}\n'
+            "```\n\n"
+            "Averaging is deliberate: partial progress over a long horizon scores above "
+            "none. Scoring at the final tree means work must accumulate — reverting an "
+            "earlier stage to pass a later one loses the earlier stage's credit. The "
+            "in-container ledger under `horizon` is telemetry only; the reward never "
+            "trusts it. No API key is needed — grading is purely test-based."
+        )
     if pipeline == "pr_diff":
         return (
             "The reward is a **6-component diff-similarity** score "

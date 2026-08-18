@@ -255,8 +255,96 @@ class EquivalenceTestsOptions(_BaseOptions):
     skip_validation: bool = False
 
 
+class PRChainOptions(_BaseOptions):
+    """Long-horizon chains: many PRs replayed as gated stages in one environment.
+
+    A chain is a contiguous run of the default branch's first-parent history,
+    split into stages that each end on a PR whose diff touched both source and
+    test files. The agent works stage by stage through an in-container `chain`
+    command; the terminal verifier re-checks every stage against the final tree
+    and rewards the mean per-stage score. See docs/pipelines/pr_chain.md.
+    """
+
+    # --- Horizon: what makes an environment long enough to be worth training on
+    limit: int = 500  # chains to emit
+    # Validation dominates the wall clock (four test runs per stage), and it is
+    # embarrassingly parallel across chains. `shard_count` workers each running
+    # with a distinct `shard_index` split one deterministic selection between
+    # them, so no two workers validate the same chain.
+    shard_index: int = 0
+    shard_count: int = 1
+    # --- Horizon, in Harbor STEPS. One stage becomes one native Harbor step, so
+    # `min_steps` is literally the number of observation/action/reward cycles the
+    # environment puts an agent through. Distinct from agent actions: a single
+    # step took Opus 4.7 roughly 27 tool calls on hermes-agent, so a 100-step
+    # chain is ~2,700 agent actions.
+    min_steps: int = 100
+    max_steps: int = 200
+    # Selection happens before validation, which drops the stages whose change
+    # moved no test (~17% on hermes-agent), so windows are grown past the target
+    # and the post-validation step count is checked absolutely.
+    step_margin: float = 1.35
+    # A chain whose stages scatter across unrelated subsystems is a queue of chores
+    # rather than one sustained piece of work, so this filters the worst of them.
+    #
+    # Coherence and horizon pull hard against each other, and at 100 steps the
+    # ceiling is low: across 100-stage windows on hermes-agent the median
+    # dominant-subsystem share is 0.26 and only 2 windows reach 0.4. A 100-step
+    # chain simply spans more of the codebase than one subsystem. At this length
+    # quality has to come from the verifiable gates below, not from focus.
+    min_coherence: float = 0.25
+
+    # --- Stage anchoring (which PRs can gate a milestone)
+    min_lines_changed: int = 10
+    max_lines_changed: int = 1500
+    max_source_files_per_stage: int = 20
+    # Every stage names a real pull request. Best-effort attribution resolves ~61%
+    # of stages on hermes-agent; the rest are direct pushes or non-tip commits of
+    # rebase merges, whose objective would be a bare commit subject.
+    require_pr_link: bool = True
+    # A stage's objective comes from its PR title and body. Below this many words
+    # there is no problem statement to work from, only a title.
+    min_instruction_words: int = 12
+
+    # --- Carry: history the environment replays for free between stages
+    max_carry_steps: int = 25
+    max_carry_lines: int = 60_000
+
+    # --- Corpus
+    harvest: bool = True  # fetch missing PR metadata before building chains
+    ref: str = "HEAD"
+
+    # --- Validation (four test runs per stage: base, stage start, gold, head)
+    validation_timeout_sec: int = 900
+    max_pass_to_pass_per_stage: int = 50
+    # A regression guard is recorded per stage but not required, because
+    # PASS_TO_PASS is computed only over the stage's OWN targeted test files. A
+    # stage that adds a brand-new test file legitimately has none, and requiring
+    # one threw away 5 of 24 otherwise-valid stages on hermes-agent. Set this
+    # above 0 only if a repo's stages reliably touch pre-existing test files.
+    min_pass_to_pass_per_stage: int = 0
+    skip_validation: bool = False  # emit unvalidated chains (debug / fast iteration)
+    # `step_margin` above supersedes the old action-floor margin.
+
+    # --- Emission
+    overlap_ladder: list[float] = [0.0, 0.25, 0.5]
+    # Per-STEP budgets. Harbor invokes the agent once per step, so these bound one
+    # milestone rather than the whole chain.
+    step_agent_timeout_sec: float = 3_600.0
+    step_verifier_timeout_sec: float = 900.0
+    # Task-level budgets, kept for the [agent]/[verifier] defaults Harbor reads
+    # when a step does not override them.
+    agent_timeout_sec: float = 3_600.0
+    verifier_timeout_sec: float = 900.0
+    # Abort the remaining steps when a checkpoint step earns nothing at all: the
+    # agent is not making contact with the task, and each further step costs
+    # another agent invocation for the same zero. 0 disables the gate.
+    hopeless_checkpoint_every: int = 25
+
+
 OPTIONS_REGISTRY: dict[str, type[_BaseOptions]] = {
     "pr_runtime": PRRuntimeOptions,
+    "pr_chain": PRChainOptions,
     "pr_diff": PRDiffOptions,
     "commit_runtime": CommitRuntimeOptions,
     "code_instruct": CodeInstructOptions,

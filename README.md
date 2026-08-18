@@ -114,6 +114,7 @@ A pipeline turns a repo into Harbor tasks. **Three are stable** and recommended 
 - **[`cve_patches`](./docs/pipelines/cve_patches.md)** — security tasks from public CVEs, mapped to their fix commits.
 - **[`code_instruct`](./docs/pipelines/code_instruct.md)** — generates a problem + executable verifier from a real source file.
 - **[`equivalence_tests`](./docs/pipelines/equivalence_tests.md)** — the agent reimplements a real function; generated tests check it matches the original.
+- **[`pr_chain`](./docs/pipelines/pr_chain.md)** — **long-horizon**: one env per contiguous run of history, split into PR-gated stages. The agent drives an in-container `chain` command through 20+ milestones; reward is the mean per-stage F2P/P2P score. Emitted only when the chain's *minimum* solvable action count clears 100.
 
 ### At a glance
 
@@ -125,6 +126,7 @@ A pipeline turns a repo into Harbor tasks. **Three are stable** and recommended 
 | `cve_patches` | experimental | GitHub | `test_execution` + `diff_similarity` | ✅ | at env build — one-time, cached | Py · Go · Node · Rust |
 | `code_instruct` | experimental | GitHub · GitLab · local | `test_execution` | ✅ | at synthesis — writes the task | Py |
 | `equivalence_tests` | experimental | GitHub · GitLab · local | `test_execution` | ✅ | at synthesis — writes the task | Py |
+| `pr_chain` | experimental | GitHub · GitLab | `test_execution` (mean over stages) | ✅ | at env build — one-time, cached | Py · Go · Node · Rust |
 
 **What the columns mean**
 - **Source** — where `--repo` can point. **`GitHub · GitLab · local`** = a GitHub `owner/name`, a `gitlab.com` URL, **or a local path** (`/abs`, `./rel`, `~`, `file://`); these need only git + source files. **`GitHub · GitLab`** = PR/MR-mining pipelines (work on github.com and gitlab.com, not a bare local clone — no pull/merge requests there). **`GitHub`** = needs the GitHub commit API + OSV CVE data (`cve_patches`). `generate` blocks an unsupported source up front with a clear, actionable error.

@@ -43,6 +43,30 @@ import tomli_w
 
 
 @dataclass(slots=True)
+class HarborStep:
+    """One step of a native Harbor multi-step task.
+
+    Harbor drives the loop itself: it shows `instruction`, runs the agent, then
+    runs `test_script` and records that step's reward before moving on. So a step
+    is a real environment transition — observation, action, reward — rather than
+    something a task-supplied controller simulates inside the container.
+
+    `min_reward` aborts the remaining steps when this one scores below the
+    threshold, which is Harbor's `terminated`. Leave it unset to let an agent that
+    fails one milestone keep earning credit on later ones.
+    """
+
+    name: str
+    instruction: str
+    test_script: str
+    solve_script: str | None = None
+    aux_files: dict[str, str] = field(default_factory=dict)
+    agent_timeout_sec: float | None = None
+    verifier_timeout_sec: float = 900.0
+    min_reward: float | None = None
+
+
+@dataclass(slots=True)
 class HarborTask:
     name: str
     org: str
@@ -58,10 +82,21 @@ class HarborTask:
     # default env / test runner for those.
     environment_dockerfile: str | None = None
     test_script: str | None = None
+    # Harbor's per-task budgets. The defaults suit a single-fix task; a
+    # long-horizon chain needs far more, because one session must cover every
+    # stage and the verifier re-runs every stage's tests.
+    agent_timeout_sec: float = 1800.0
+    verifier_timeout_sec: float = 300.0
     # Extra files written under the task dir (relative path -> content), e.g.
     # {"tests/verifier.py": ..., "tests/f2p.json": ...}. Harbor exposes tests/
     # at /tests in the container so test.sh can read them.
     aux_files: dict[str, str] = field(default_factory=dict)
+    # Native Harbor multi-step tasks. When non-empty the writer emits
+    # `steps/<name>/{instruction.md,tests/test.sh,solution/solve.sh}` and a
+    # `steps` array in task.toml, and Harbor runs one agent+verifier cycle per
+    # step. `multi_step_reward_strategy` defaults to Harbor's own "mean".
+    steps: list[HarborStep] = field(default_factory=list)
+    multi_step_reward_strategy: str | None = None
 
 
 def _content_hash(task: HarborTask) -> str:
@@ -70,6 +105,22 @@ def _content_hash(task: HarborTask) -> str:
     h.update(b"\0")
     h.update(task.oracle_diff.encode("utf-8"))
     return f"sha256:{h.hexdigest()}"
+
+
+def _step_table(step: HarborStep) -> dict[str, Any]:
+    """Render one `[[steps]]` entry for task.toml.
+
+    Only non-default keys are emitted so the file stays readable at 100 steps.
+    """
+    table: dict[str, Any] = {
+        "name": step.name,
+        "verifier": {"timeout_sec": step.verifier_timeout_sec},
+    }
+    if step.agent_timeout_sec is not None:
+        table["agent"] = {"timeout_sec": step.agent_timeout_sec}
+    if step.min_reward is not None:
+        table["min_reward"] = step.min_reward
+    return table
 
 
 def write_harbor_task(task: HarborTask, dest_dir: Path) -> Path:
@@ -129,9 +180,12 @@ def write_harbor_task(task: HarborTask, dest_dir: Path) -> Path:
             "keywords": task.keywords,
             "repo2env": repo2env,
         },
-        "agent": {"timeout_sec": 1800.0},
-        "verifier": {"timeout_sec": 300.0},
+        "agent": {"timeout_sec": task.agent_timeout_sec},
+        "verifier": {"timeout_sec": task.verifier_timeout_sec},
     }
+    if task.steps:
+        payload["multi_step_reward_strategy"] = task.multi_step_reward_strategy or "mean"
+        payload["steps"] = [_step_table(step) for step in task.steps]
     (task_path / "task.toml").write_bytes(tomli_w.dumps(payload).encode("utf-8"))
 
     # instruction.md
@@ -171,6 +225,29 @@ def write_harbor_task(task: HarborTask, dest_dir: Path) -> Path:
         (tests_dir / "test.sh").write_text(task.test_script, encoding="utf-8")
         # mark executable; harbor expects test.sh to be runnable
         (tests_dir / "test.sh").chmod(0o755)
+
+    # steps/<name>/{instruction.md, tests/test.sh, solution/solve.sh} — the
+    # layout Harbor discovers for a native multi-step task. Each step's verifier
+    # produces that step's reward, so one step is one environment transition.
+    for step in task.steps:
+        step_dir = task_path / "steps" / step.name
+        (step_dir / "tests").mkdir(parents=True, exist_ok=True)
+        (step_dir / "instruction.md").write_text(step.instruction, encoding="utf-8")
+        test_path = step_dir / "tests" / "test.sh"
+        test_path.write_text(step.test_script, encoding="utf-8")
+        test_path.chmod(0o755)
+        if step.solve_script is not None:
+            solution_dir = step_dir / "solution"
+            solution_dir.mkdir(parents=True, exist_ok=True)
+            solve_path = solution_dir / "solve.sh"
+            solve_path.write_text(step.solve_script, encoding="utf-8")
+            solve_path.chmod(0o755)
+        for rel_path, content in step.aux_files.items():
+            target = (step_dir / rel_path).resolve()
+            if not str(target).startswith(str(step_dir.resolve())):
+                raise ValueError(f"step aux_file escapes step dir: {rel_path!r}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
 
     # Auxiliary task files (relative paths under the task dir). Harbor mounts
     # the task's tests/ dir into the container at /tests, so a pipeline can
